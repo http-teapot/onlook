@@ -1,22 +1,37 @@
 import { createClient as createTRPCClient } from '@/trpc/request-server';
 import { trackEvent } from '@/utils/analytics/server';
 import { createClient as createSupabaseClient } from '@/utils/supabase/request-server';
-import { askToolSet, buildToolSet, getAskModeSystemPrompt, getCreatePageSystemPrompt, getSystemPrompt, initModel } from '@onlook/ai';
+import {
+    askToolSet,
+    buildToolSet,
+    CREATE_FILE_TOOL_NAME,
+    EDIT_FILE_TOOL_NAME,
+    getAskModeSystemPrompt,
+    getCreatePageSystemPrompt,
+    getSystemPrompt,
+    initModel,
+    LIST_FILES_TOOL_NAME,
+    READ_FILES_TOOL_NAME,
+} from '@onlook/ai';
 import { ChatType, CLAUDE_MODELS, LLMProvider, type Usage, UsageType } from '@onlook/models';
-import { generateObject, NoSuchToolError, streamText } from 'ai';
+import { generateObject, NoSuchToolError, streamText, tool } from 'ai';
 import { type NextRequest } from 'next/server';
+import { tools, ToolsOptionsProvider } from './tools';
 
 export async function POST(req: NextRequest) {
     try {
         const user = await getSupabaseUser(req);
         if (!user) {
-            return new Response(JSON.stringify({
-                error: 'Unauthorized, no user found. Please login again.',
-                code: 401
-            }), {
-                status: 401,
-                headers: { 'Content-Type': 'application/json' }
-            });
+            return new Response(
+                JSON.stringify({
+                    error: 'Unauthorized, no user found. Please login again.',
+                    code: 401,
+                }),
+                {
+                    status: 401,
+                    headers: { 'Content-Type': 'application/json' },
+                },
+            );
         }
 
         const usageCheckResult = await checkMessageLimit(req);
@@ -28,31 +43,39 @@ export async function POST(req: NextRequest) {
                     usage: usageCheckResult.usage,
                 },
             });
-            return new Response(JSON.stringify({
-                error: 'Message limit exceeded. Please upgrade to a paid plan.',
-                code: 402,
-                usage: usageCheckResult.usage,
-            }), {
-                status: 402,
-                headers: { 'Content-Type': 'application/json' }
-            });
+            return new Response(
+                JSON.stringify({
+                    error: 'Message limit exceeded. Please upgrade to a paid plan.',
+                    code: 402,
+                    usage: usageCheckResult.usage,
+                }),
+                {
+                    status: 402,
+                    headers: { 'Content-Type': 'application/json' },
+                },
+            );
         }
 
         return streamResponse(req);
     } catch (error: any) {
         console.error('Error in chat', error);
-        return new Response(JSON.stringify({
-            error: 'Internal Server Error',
-            code: 500,
-            details: error instanceof Error ? error.message : String(error)
-        }), {
-            status: 500,
-            headers: { 'Content-Type': 'application/json' }
-        });
+        return new Response(
+            JSON.stringify({
+                error: 'Internal Server Error',
+                code: 500,
+                details: error instanceof Error ? error.message : String(error),
+            }),
+            {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+            },
+        );
     }
 }
 
-export const checkMessageLimit = async (req: NextRequest): Promise<{
+export const checkMessageLimit = async (
+    req: NextRequest,
+): Promise<{
     exceeded: boolean;
     usage: Usage;
 }> => {
@@ -81,16 +104,18 @@ export const checkMessageLimit = async (req: NextRequest): Promise<{
         exceeded: false,
         usage: monthlyUsage,
     };
-}
+};
 
 export const getSupabaseUser = async (request: NextRequest) => {
     const supabase = await createSupabaseClient(request);
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+        data: { user },
+    } = await supabase.auth.getUser();
     return user;
-}
+};
 
 export const streamResponse = async (req: NextRequest) => {
-    const { messages, maxSteps, chatType } = await req.json();
+    const { messages, maxSteps, chatType, projectId } = await req.json();
     const { model, providerOptions } = await initModel({
         provider: LLMProvider.ANTHROPIC,
         model: CLAUDE_MODELS.SONNET_4,
@@ -109,7 +134,83 @@ export const streamResponse = async (req: NextRequest) => {
             systemPrompt = getSystemPrompt();
             break;
     }
+
+    const { api } = await createTRPCClient(req);
+    const project = await api.project.get({ projectId });
+    if (!project) {
+        throw new Error('Project not found');
+    }
+
     const toolSet = chatType === ChatType.ASK ? askToolSet : buildToolSet;
+    if (LIST_FILES_TOOL_NAME in toolSet) {
+        toolSet[LIST_FILES_TOOL_NAME] = tool({
+            ...toolSet[LIST_FILES_TOOL_NAME],
+            execute: async (args, options) => {
+                return tools[LIST_FILES_TOOL_NAME](args, {
+                    provider: project.sandbox.id
+                        ? ToolsOptionsProvider.CODESANDBOX
+                        : ToolsOptionsProvider.UNIMPLEMENTED,
+                    codesandbox: project.sandbox?.id
+                        ? {
+                              sandboxId: project.sandbox.id,
+                          }
+                        : undefined,
+                });
+            },
+        });
+    }
+    // if (EDIT_FILE_TOOL_NAME in toolSet) {
+    //     toolSet[EDIT_FILE_TOOL_NAME] = tool({
+    //         ...toolSet[EDIT_FILE_TOOL_NAME],
+    //         execute: async (args, options) => {
+    //             return tools[EDIT_FILE_TOOL_NAME](args, (args) => api.code.applyDiff.mutate(args), {
+    //                 provider: project.sandbox.id
+    //                     ? ToolsOptionsProvider.CODESANDBOX
+    //                     : ToolsOptionsProvider.UNIMPLEMENTED,
+    //                 codesandbox: project.sandbox?.id
+    //                     ? {
+    //                           sandboxId: project.sandbox.id,
+    //                       }
+    //                     : undefined,
+    //             });
+    //         },
+    //     });
+    // }
+    if (CREATE_FILE_TOOL_NAME in toolSet) {
+        toolSet[CREATE_FILE_TOOL_NAME] = tool({
+            ...toolSet[CREATE_FILE_TOOL_NAME],
+            execute: async (args, options) => {
+                return tools[CREATE_FILE_TOOL_NAME](args, {
+                    provider: project.sandbox.id
+                        ? ToolsOptionsProvider.CODESANDBOX
+                        : ToolsOptionsProvider.UNIMPLEMENTED,
+                    codesandbox: project.sandbox?.id
+                        ? {
+                              sandboxId: project.sandbox.id,
+                          }
+                        : undefined,
+                });
+            },
+        });
+    }
+    if (READ_FILES_TOOL_NAME in toolSet) {
+        toolSet[READ_FILES_TOOL_NAME] = tool({
+            ...toolSet[READ_FILES_TOOL_NAME],
+            execute: async (args, options) => {
+                return tools[READ_FILES_TOOL_NAME](args, {
+                    provider: project.sandbox.id
+                        ? ToolsOptionsProvider.CODESANDBOX
+                        : ToolsOptionsProvider.UNIMPLEMENTED,
+                    codesandbox: project.sandbox?.id
+                        ? {
+                              sandboxId: project.sandbox.id,
+                          }
+                        : undefined,
+                });
+            },
+        });
+    }
+
     const result = streamText({
         model,
         messages: [
@@ -141,7 +242,7 @@ export const streamResponse = async (req: NextRequest) => {
                 schema: tool?.parameters,
                 prompt: [
                     `The model tried to call the tool "${toolCall.toolName}"` +
-                    ` with the following arguments:`,
+                        ` with the following arguments:`,
                     JSON.stringify(toolCall.args),
                     `The tool accepts the following schema:`,
                     JSON.stringify(parameterSchema(toolCall)),
@@ -162,7 +263,6 @@ export const streamResponse = async (req: NextRequest) => {
             if (!user) {
                 throw new Error('User not found');
             }
-            const { api } = await createTRPCClient(req);
             await api.usage.increment({
                 type: UsageType.MESSAGE,
             });
@@ -172,4 +272,4 @@ export const streamResponse = async (req: NextRequest) => {
     }
 
     return result.toDataStreamResponse();
-}
+};
