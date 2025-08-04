@@ -20,6 +20,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         id: 'user-chat',
         api: '/api/chat',
         maxSteps: 20,
+        body: {
+            projectId: editorEngine.projectId,
+        },
         onToolCall: (toolCall) => handleToolCall(toolCall.toolCall, editorEngine),
         onFinish: (message, { finishReason }) => {
             lastMessageRef.current = message;
@@ -65,6 +68,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
         return chat.reload({
             body: {
+                projectId: editorEngine.projectId,
                 chatType: type,
             },
         });
